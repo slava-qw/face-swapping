@@ -165,7 +165,7 @@ def compute_features_wrapp(path, model, output_file, batch_size, device,
     pred_arr = compute_features(files, model, output_file, batch_size, device, num_workers)
 
     if ret_tgt:
-        tgt_ids = sorted([int(img_name.split('__tgt_')[1].split('.jpg')[0]) for img_name in os.listdir(path)])
+        tgt_ids = sorted([int(img_name.split('__tgt_')[1].split('.')[0]) for img_name in os.listdir(path)])
         return pred_arr, tgt_ids
 
     return pred_arr

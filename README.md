@@ -18,6 +18,16 @@ All additional information (like, weights of pretrained models, and folder struc
 Although many methods use their own models architectures (trained from scratch), recent works follow the paradigm of using pre-trained large models for high-resolution conditional image generation, while training only small id-retrieval / swapping networks.
 And the most popular of them is StyleGAN2 ([sourece code](https://github.com/NVlabs/stylegan2-ada-pytorch)).
 
+Own metrics evaluation:
+
+| Method    | FID-10k | LPIPS | Pose  | Exp. | ID retr. / sim |
+|-----------|---------|---|---|---|---|
+| MegaFS    | 44.89   | 0.49  | 20.57 |      | |
+| SimSwap   | 28.92   | 0.31  | 20.95 |      |  |
+| HifiFace* | 21.61   |   0.069    |    18.94   |      |  |
+| GHOST     |         |       |    |      |  |
+
+*are calculated with 1k sample of generated images fromCeleba-HQ dataset due to time constraints and face detection issues.
 
 ## TODO:
 - [ ] fix all paths
