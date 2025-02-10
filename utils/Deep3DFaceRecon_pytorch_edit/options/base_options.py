@@ -4,9 +4,9 @@ import sys
 import argparse
 import os
 
-relative_path = './Deep3DFaceRecon_pytorch_edit/'
-sys.path.append(os.path.abspath(relative_path))
-# sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# relative_path = './Deep3DFaceRecon_pytorch_edit/'
+# sys.path.append(os.path.abspath(relative_path))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import importlib
 from util import util

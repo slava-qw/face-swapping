@@ -34,7 +34,9 @@ import torch.nn.functional as F
 import torchvision.transforms as TF
 from PIL import Image
 from natsort import natsorted
+import sys
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from Deep3DFaceRecon_pytorch_edit.options.test_options import TestOptions
 from Deep3DFaceRecon_pytorch_edit.models import create_model
 
@@ -154,7 +156,7 @@ def compute_features(files, model, output_file, batch_size=50, device='cpu',
         df = pd.DataFrame(pred, columns=range(64))
         df.to_csv(output_file, mode='a', header=False, index=False)  # Append to the file
 
-    return pd.read_csv(output_file).to_numpy()
+    return pd.read_csv(output_file, header=None).to_numpy()
 
 
 def compute_features_wrapp(path, model, output_file, batch_size, device,

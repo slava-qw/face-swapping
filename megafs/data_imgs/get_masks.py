@@ -1,4 +1,3 @@
-# @title optimized version for mask collection
 import os
 import numpy as np
 from PIL import Image

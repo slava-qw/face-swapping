@@ -20,16 +20,26 @@ And the most popular of them is StyleGAN2 ([sourece code](https://github.com/NVl
 
 Own metrics evaluation:
 
-| Method    | FID-10k | LPIPS | Pose  | Exp. | ID retr. / sim |
-|-----------|---------|---|---|---|---|
-| MegaFS    | 44.89   | 0.49  | 20.57 |      | |
-| SimSwap   | 28.92   | 0.31  | 20.95 |      |  |
-| HifiFace* | 21.61   |   0.069    |    18.94   |      |  |
-| GHOST     |         |       |    |      |  |
+| Method    | FID-10k, | LPIPS | Pose  | Exp. | Mean ID sim. |
+|-----------|----------|---|---|------|--------------|
+| MegaFS    | 44.89    | 0.49  | 20.57 | 2.43 | 0.94         |
+| SimSwap   | 28.92    | 0.31  | 20.95 | 2.45 | 0.94         |
+| HifiFace* | 21.61    |   0.069    |    18.94   | 2.27 | 0.93         |
 
-*are calculated with 1k sample of generated images fromCeleba-HQ dataset due to time constraints and face detection issues.
+*are calculated with 1k sample of generated images from Celeba-HQ dataset due to time constraints and face detection issues.
+
+The values calculated in the comparison table were extracted via pretrained models. All instructions for usage and weights can be found in the links below:
+- FID: [pytorch-fid](https://github.com/mseitzer/pytorch-fid)
+- LPIPS: [PerceptualSimilarity](https://github.com/richzhang/PerceptualSimilarity)
+- Pose:  Bardia Doosti, et al. "Hope-net: A graph-based model for hand-object
+pose estimation". In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pages 6608–
+6617, 2020. ([url](https://www.researchgate.net/publication/340374324_HOPE-Net_A_Graph-based_Model_for_Hand-Object_Pose_Estimation))
+- ID similarity:  [Deep3DFaceRecon](https://github.com/sicxu/Deep3DFaceRecon_pytorch) from Yu Deng, et al. "Accurate 3d face reconstruction with weakly-supervised learning: From single image to image set".
+In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition workshops, pages 0–0, 2019.
+
+For the pose and expression the L2 distance was employed to compare the vectorised representations of 
+target image and swapped image.
 
 ## TODO:
 - [ ] fix all paths
-- [ ] fix id retr./simm. and expression metrics for evaluation
-- [ ] add comparison table or link to results

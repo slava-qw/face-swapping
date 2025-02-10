@@ -31,11 +31,7 @@ import torch
 import torchvision.transforms as TF
 import torchvision.transforms.functional as TFF
 from PIL import Image
-import re
-from scipy import linalg
-from torch.nn.functional import adaptive_avg_pool2d
-from model_irse import Backbone
-# import clip
+# from model_irse import Backbone
 import torchvision
 
 try:
@@ -48,6 +44,7 @@ import cv2
 import albumentations as A
 import torch.nn as nn
 from natsort import natsorted
+import pandas as pd
 
 # from inception import InceptionV3
 
@@ -62,18 +59,14 @@ parser.add_argument('--device', type=str, default=None,
 parser.add_argument('--dataset', type=str, default='celeba', help='Dataset to use')
 parser.add_argument('--mask', type=bool, default=True,
                     help='whether to use mask or not')
-# parser.add_argument('--dims', type=int, default=2048,
-#                     choices=list(InceptionV3.BLOCK_INDEX_BY_DIM),
-#                     help=('Dimensionality of Inception features to use. '
-#                           'By default, uses pool3 features'))
-parser.add_argument('path', type=str, nargs=4,
-                    default=['dataset/FaceData/CelebAMask-HQ/CelebA-HQ-img', 'results/test_bench/results',
-                             'dataset/FaceData/CelebAMask-HQ/src_mask', 'dataset/FaceData/CelebAMask-HQ/target_mask'],
+parser.add_argument('--path', type=str, nargs=4,
+                    default=['/content/CelebAMask-HQ/CelebA-HQ-img', '/content/gen_simswap_10k',
+                             '/content/content/masks_output', '/content/content/masks_output'],
                     help=('Paths to the generated images or '
                           'to .npz statistic files'))
 
 parser.add_argument('--print_sim', type=bool, default=False, )
-parser.add_argument('--arcface', type=bool, default=False)
+parser.add_argument('--arcface', type=bool, default=True)
 IMAGE_EXTENSIONS = {'bmp', 'jpg', 'jpeg', 'pgm', 'png', 'ppm',
                     'tif', 'tiff', 'webp'}
 
@@ -93,15 +86,12 @@ def un_norm_clip(x1):
     return x
 
 
-def get_tensor_clip(normalize=True, toTensor=True):
-    transform_list = []
-    if toTensor:
-        transform_list += [torchvision.transforms.ToTensor()]
-
-    if normalize:
-        transform_list += [torchvision.transforms.Normalize((0.48145466, 0.4578275, 0.40821073),
-                                                            (0.26862954, 0.26130258, 0.27577711))]
-    return torchvision.transforms.Compose(transform_list)
+def parse_mask_path(path: str, mask_type: str = "src") -> str:
+    idx_s = path.split('/')[-1].split('.')[0].split('_')
+    idx = idx_s[2 if mask_type == 'src' else 5]
+    idx = "0" * (5 - len(idx)) + idx
+    mask_path = os.path.join("/content/masks_output", f"{idx}_mask.png")
+    return mask_path
 
 
 class IDLoss(nn.Module):
@@ -114,7 +104,7 @@ class IDLoss(nn.Module):
         self.facenet = Backbone(input_size=112, num_layers=50, drop_ratio=0.6, mode='ir_se')
 
         self.facenet.load_state_dict(
-            torch.load("model_ir_se50.pth"))
+            torch.load("/content/ir_se50.pth", map_location='cpu'))
 
         self.face_pool_2 = torch.nn.AdaptiveAvgPool2d((112, 112))
         self.facenet.eval()
@@ -154,140 +144,37 @@ def get_tensor(normalize=True, toTensor=True):
     return torchvision.transforms.Compose(transform_list)
 
 
-class ImagePathDataset(torch.utils.data.Dataset):
-    def __init__(self, files, transforms=None):
-        self.files = files
-        self.transforms = transforms
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        # _, self.preprocess = clip.load("ViT-B/32", device=device)
-        # self.preprocess
-        # eval_transform = transforms.Compose([transforms.ToTensor(),
-        #                                  transforms.Resize(112),
-        #                                  transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
-    def __len__(self):
-        return len(self.files)
-
-    def __getitem__(self, i):
-        path = self.files[i]
-        image = get_tensor()(Image.open(path).convert('RGB').resize((112, 112))).unsqueeze(0)
-        return image
-
-
 class MaskedImagePathDataset(torch.utils.data.Dataset):
-    str2num = {
-        # 0: 'background',
-        1: 'skin',
-        2: 'l_brow',
-        3: 'r_brow',
-        4: 'l_eye',
-        5: 'r_eye',
-        # 6: 'eye_g',
-        7: 'l_ear',
-        8: 'r_ear',
-        # 9: 'ear_r',
-        10: 'nose',
-        11: 'mouth',
-        12: 'u_lip',
-        13: 'l_lip',
-        14: 'neck',
-        # 15: 'neck_l',
-        # 16: 'cloth',
-        17: 'hair',
-        # 18: 'hat'
-    }
-
-    def __init__(self, files, maskfiles=None, transforms=None, data_name="celeba"):
+    def __init__(self, files, mask_type, maskfiles=None, transforms=None):
         self.files = files
+        self.mask_type = mask_type
         self.maskfiles = maskfiles
+
         self.transforms = transforms
         self.trans = A.Compose([
             A.Resize(height=112, width=112)])
-        self.data_name = data_name
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        # _, self.preprocess = clip.load("ViT-B/32", device=device)
-        # self.preprocess
-        # eval_transform = transforms.Compose([transforms.ToTensor(),
-        #                                  transforms.Resize(112),
-        #                                  transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
     def __len__(self):
         return len(self.files)
 
-    @staticmethod
-    def find_path(file_end, dir_path="/content/CelebAMask-HQ/CelebAMask-HQ-mask-anno"):
-        file_end += '.png'
-
-        for root, dirs, files in os.walk(dir_path):
-            for dir in dirs:
-                for root, dirs, files in os.walk(os.path.join(dir_path, dir)):
-                    for file in files:
-                        if file.endswith(file_end):
-                            return os.path.join(root, file)
-        return None
-
-    @staticmethod
-    def load_array(path_to_file):
-        im_frame = Image.open(path_to_file).convert('RGB')
-        np_frame = np.array(im_frame.getdata())  # (H * W, C)
-        return np_frame
-
-    def encode_segmentation_rgb(self, tgt_idx, no_neck=True):
-        face_part_ids = list(
-            self.str2num.keys())  #  [1, 2, 3, 4, 5, 6, 10, 12, 13] if no_neck else [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 13, 14]
-
-        # mouth_map = self.load_array(self.find_path(file_end=f"{tgt_idx}_mouth"))
-        # hair_map = self.load_array(self.find_path(file_end=f"{tgt_idx}_hair"))
-
-        face_map = np.zeros_like((512 * 512, 3))
-        for valid_id in face_part_ids:
-            attr_path = self.find_path(file_end=f"{tgt_idx}_{self.str2num[valid_id]}")
-            if attr_path is None:
-                continue
-            face_map += self.load_array(attr_path)
-
-        face_map = np.clip(face_map, 0, 255).astype(np.uint8)
-        # mouth_map = np.clip(mouth_map, 0, 255).astype(np.uint8)
-        # hair_map = np.clip(hair_map, 0, 255).astype(np.uint8)
-
-        return face_map.reshape(512, 512, 3)  # np.stack([face_map, mouth_map, hair_map], axis=2)
-
     def __getitem__(self, i):
         path = self.files[i]
-        # image=Image.open(path).convert('RGB')
-        # ref_img_path = self.ref_imgs[index]
-        # print(path)
         image = cv2.imread(str(path))
-        # ref_img = Image.open(ref_img_path).convert('RGB').resize((224,224))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        mask_path = self.maskfiles[i]
+        if self.mask_type == 'src':
+            mask_path = self.maskfiles[i]
+        else:
+            mask_path = parse_mask_path(str(path), self.mask_type)
+
         ref_mask_img = Image.open(mask_path).convert('L')
+        ref_mask_img = np.array(ref_mask_img)  # Convert the label to a NumPy array if it's not already
 
-        # ref_mask_img = np.array(ref_mask_img)  # Convert the label to a NumPy array if it's not already
-
-        # if self.data_name=="celeba":
-        #     preserve = [1,2,4,5,8,9 ,6,7,10,11,12 ]
-        # elif self.data_name=="ffhq":
-        #     preserve = [1,2,3,5,6,7,9]
-        # elif self.data_name=="ff++":
-        #     preserve = [1,2,4,5,8,9 ]
-        # else:
-        #     preserve=[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]  # No mask
-        # # preserve = [1,2,4,5,8,9 ,6,7,10,11,12 ] # CelebA-HQ
-        # # preserve = [1,2,3,5,6,7,9]  # FFHQ or FF++
-        # # print("preserve:",preserve)
-        # # preserve = [1,2,4,5,8,9 ]
-        # ref_mask= np.isin(ref_mask_img, preserve)
-
-        ref_mask = self.encode_segmentation_rgb(tgt_idx=path.split("/")[-1].split(".")[0])
-        # # Create a converted_mask where preserved values are set to 255
+        # Create a converted_mask where preserved values are set to 255
         ref_converted_mask = np.zeros_like(ref_mask_img)
-        ref_converted_mask[ref_mask] = 255
+        ref_converted_mask[ref_mask_img] = 255
 
         ref_converted_mask = Image.fromarray(ref_converted_mask).convert('L')
-        # # convert to PIL image
-
         reference_mask_tensor = get_tensor(normalize=False, toTensor=True)(ref_converted_mask)
 
         mask_ref = TF.Resize((112, 112))(reference_mask_tensor)
@@ -299,25 +186,11 @@ class MaskedImagePathDataset(torch.utils.data.Dataset):
         ref_img = ref_img * mask_ref
         image = ref_img.unsqueeze(0)
 
-        # ref_mask_img_r = ref_converted_mask.resize(image.shape[1::-1], Image.NEAREST)
-        # ref_mask_img_r = np.array(ref_mask_img_r)
-        # image[ref_mask_img_r==0]=0
-
-        # image=self.trans(image=image)
-        # image=Image.fromarray(image["image"])
-        # image=get_tensor()(image)
-
-        # # ref_img=Image.fromarray(ref_img)
-
-        # # ref_img=get_tensor_clip()(ref_img)
-        # image = image.unsqueeze(0)
-
-        # image = get_tensor()(Image.open(path).convert('RGB').resize((112,112))).unsqueeze(0)
         return image
 
 
-def compute_features(files, mask_files, model, other_model, batch_size=50, dims=2048, device='cpu',
-                     num_workers=1, data_name="celeba"):
+def compute_features(files, mask_files, mask_type, model, output_file, batch_size=50, device='cpu',
+                     num_workers=1):
     """Calculates the activations of the pool_3 layer for all images.
     Params:
     -- files       : List of image files paths
@@ -334,6 +207,7 @@ def compute_features(files, mask_files, model, other_model, batch_size=50, dims=
     -- A numpy array of dimension (num images, dims) that contains the
        activations of the given tensor when feeding inception with the
        query tensor.
+       :param mask_type:
     """
     model.eval()
 
@@ -342,17 +216,13 @@ def compute_features(files, mask_files, model, other_model, batch_size=50, dims=
                'Setting batch size to data size'))
         batch_size = len(files)
 
-    dataset = MaskedImagePathDataset(files, maskfiles=mask_files, transforms=TF.ToTensor(), data_name=data_name)
+    dataset = MaskedImagePathDataset(files, mask_type, maskfiles=mask_files, transforms=TF.ToTensor())
 
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=batch_size,
                                              shuffle=False,
                                              drop_last=False,
                                              num_workers=num_workers)
-
-    pred_arr = np.empty((len(files), 512))
-
-    start_idx = 0
 
     for batch in tqdm(dataloader):
         batch = batch.to(device).squeeze(1)
@@ -362,114 +232,100 @@ def compute_features(files, mask_files, model, other_model, batch_size=50, dims=
 
         pred = pred.cpu().numpy()
 
-        pred_arr[start_idx:start_idx + pred.shape[0]] = pred
+        df = pd.DataFrame(pred, columns=range(512))
+        df.to_csv(output_file, mode='a', header=False, index=False)  # Append to the file
 
-        start_idx = start_idx + pred.shape[0]
+    return pd.read_csv(output_file).to_numpy()
+
+
+def compute_features_wrapp(path, mask_path, IDLoss_model, batch_size, device, output_name, num_workers=1, ret_tgt=True):
+    path = pathlib.Path(path)
+    files = natsorted([file for ext in IMAGE_EXTENSIONS
+                       for file in path.glob('*.{}'.format(ext))])
+    # breakpoint()
+    mask_path = pathlib.Path(mask_path)
+    mask_files = natsorted([file for ext in IMAGE_EXTENSIONS
+                            for file in mask_path.glob('*.{}'.format(ext))])
+
+    mask_type = 'src' if output_name.startswith("exp_real") else "tgt"
+    # pred_arr = compute_features(files, mask_files, mask_type, IDLoss_model, output_name, batch_size, device,
+                                # num_workers)
+    pred_arr = pd.read_csv("/content/exp_real_simswap_ids.csv", header=None).to_numpy()
+    if ret_tgt:
+        pred_arr = compute_features(files, mask_files, mask_type, IDLoss_model, output_name, batch_size, device,
+                                num_workers)
+        # pred_arr = pd.read_csv("/content/exp_gen_simswap_ids.csv", header=None).to_numpy()
+        ids = sorted([
+            int(parse_mask_path(img_name, mask_type).split('.')[0].split("_")[1].split('/')[-1])
+            for img_name in os.listdir(path)
+            ])
+        return pred_arr, ids
 
     return pred_arr
 
 
-def compute_features_wrapp(path, mask_path, IDLoss_model, Other_model, batch_size, dims, device,
-                           num_workers=1, data_name="celeba"):
-    if path.endswith('.npz'):
-        with np.load(path) as f:
-            m, s = f['mu'][:], f['sigma'][:]
-    else:
-        path = pathlib.Path(path)
-        files = natsorted([file for ext in IMAGE_EXTENSIONS
-                           for file in path.glob('*.{}'.format(ext))])
-        # breakpoint()
-        mask_path = pathlib.Path(mask_path)
-        mask_files = natsorted([file for ext in IMAGE_EXTENSIONS
-                                for file in mask_path.glob('*.{}'.format(ext))])
-        # Extract all numbers before the dot using regular expression
-        # breakpoint()
-        pattern = r'[_\/.-]'
-
-        # Split the file path using the pattern
-        parts = [re.split(pattern, str(file.name)) for file in files]
-        # breakpoint()
-        # Filter out non-numeric parts and convert to integers
-        numbers = [[int(par) for par in part if par.isdigit()] for part in parts]
-
-        numbers = [num[0] for num in numbers if len(num) > 0]
-        # breakpoint()
-        mi_num = min(numbers)
-        # if numbers[0]>28000: # CelebA-HQ Test my split #check 28000-29000: target 29000-30000: source
-        numbers = [(num - mi_num) for num in numbers]  # celeb
-        # breakpoint()
-        pred_arr = compute_features(files, mask_files, IDLoss_model, Other_model, batch_size,
-                                    dims, device, num_workers, data_name=data_name)
-
-    return pred_arr, numbers
-
-
-def calculate_id_given_paths(paths, batch_size, device, dims, num_workers=1, data_name="celeba", args=None):
-    """Calculates the FID of two paths"""
+def calculate_id_given_paths(paths, batch_size, device, num_workers=1, args=None):
     for p in paths:
         if not os.path.exists(p):
             raise RuntimeError('Invalid path: %s' % p)
 
+    print(args.device)
     if args.arcface:
-        IDLoss_model = IDLoss().cuda()
+        IDLoss_model = IDLoss().to(args.device)
 
-    feat1, ori_lab = compute_features_wrapp(paths[0], paths[2], IDLoss_model, None, batch_size,
-                                            dims, device, num_workers, data_name=data_name)
-    feat2, swap_lab = compute_features_wrapp(paths[1], paths[3], IDLoss_model, None, batch_size,
-                                             dims, device, num_workers, data_name=data_name)
+    feat1 = compute_features_wrapp(paths[0], paths[2], IDLoss_model, batch_size, device,
+                                   "exp_real__ids.csv", num_workers, ret_tgt=False)
+
+    feat2, swap_lab = compute_features_wrapp(paths[1], paths[3], IDLoss_model, batch_size, device,
+                                             "exp_gen_simswap_ids.csv", num_workers)
+
     # dot produc to get similarity
-    # breakpoint()
     dot_prod = np.dot(feat2, feat1.T)
     pred = np.argmax(dot_prod, axis=1)
     # find accuracy of top 1 and top 5
     top1 = np.sum(np.argmax(dot_prod, axis=1) == swap_lab) / len(swap_lab)
 
-    top5_predictions = np.argsort(dot_prod, axis=1)[:, -5:]  # Get indices of top-5 predictions
-    top5_correct = np.sum(np.any(top5_predictions == np.array(swap_lab)[:, np.newaxis], axis=1))
-    top5 = top5_correct / len(swap_lab)  # Top-5 accuracy
-    # breakpoint()
-    # top5 = np.sum(np.isin(np.argsort(dot_prod,axis=1)[:,-5:],swap_lab))/len(swap_lab)
-    # breakpoint()
+    print(top1)
+    print(dot_prod.shape)
+    # top5_predictions = np.argsort(dot_prod, axis=1)[:, -5:]  # Get indices of top-5 predictions
+    # top5_correct = np.sum(np.any(top5_predictions == np.array(swap_lab)[:, np.newaxis], axis=1))
+    # top5 = top5_correct / len(swap_lab)  # Top-5 accuracy
+    top5 = None
+
+    print()
     feat_sel = feat1[swap_lab]
     feat_sel = feat_sel / np.linalg.norm(feat_sel, axis=1, keepdims=True)
     feat2 = feat2 / np.linalg.norm(feat2, axis=1, keepdims=True)
     similarities = np.diagonal(np.dot(feat_sel, feat2.T))
 
-    #print from highest to lowest with index
+    mean_dot_prod = np.mean(similarities)
 
-    order = np.argsort(similarities)[::-1]
-    value = np.sort(similarities)[::-1]
-    # breakpoint()
-
-    Mean_dot_prod = np.mean(similarities)
-
-    # breakpoint()
-    return top1, top5, Mean_dot_prod, similarities
+    return top1, top5, mean_dot_prod, similarities
 
 
 def main():
-    args = parser.parse_args()
+    args = parser.parse_args([])
+    args.print_sim = True
 
     if args.device is None:
-        device = torch.device('cuda' if (torch.cuda.is_available()) else 'cpu')
+        args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     else:
-        device = torch.device(args.device)
+        args.device = torch.device(args.device)
 
     if args.num_workers is None:
-        num_avail_cpus = len(os.sched_getaffinity(0))
+        num_avail_cpus = os.cpu_count()
         num_workers = min(num_avail_cpus, 8)
     else:
         num_workers = args.num_workers
 
-    top1, top5, Mean_dot_prod, similarities = calculate_id_given_paths(args.path,
-                                                                       args.batch_size,
-                                                                       device,
-                                                                       2048,
-                                                                       num_workers, data_name=args.dataset, args=args)
+    top1, top5, mean_dot_prod, similarities = calculate_id_given_paths(args.path, args.batch_size, args.device,
+                                                                       num_workers,
+                                                                       args=args)
 
     print('Top-1 accuracy: {:.2f}%'.format(top1 * 100))
     print('Top-5 accuracy: {:.2f}%'.format(top5 * 100))
-    print('Mean ID feat:  {:.2f}'.format(Mean_dot_prod))
+    print('Mean ID feat:  {:.2f}'.format(mean_dot_prod))
+    print('Mean similarity:  {:.2f}'.format(np.mean(similarities)))
 
     if args.print_sim:
         print('Similarities: \n ')
