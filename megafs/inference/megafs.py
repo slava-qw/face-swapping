@@ -1040,7 +1040,7 @@ class Generator(nn.Module):
                 latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
 
                 latent = torch.cat([latent, latent2], 1)
-        print('latent', latent.shape)
+
         out = strucs if strucs is not None else self.input(latent)
         out = self.conv1(out, latent[:, 0], noise=noise[0])
 

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 class AddCoordsTh(nn.Module):
     def __init__(self, x_dim=64, y_dim=64, with_r=False, with_boundary=False):
         super(AddCoordsTh, self).__init__()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.x_dim = x_dim
         self.y_dim = y_dim
         self.with_r = with_r
@@ -17,19 +18,19 @@ class AddCoordsTh(nn.Module):
         """
         batch_size_tensor = input_tensor.shape[0]
 
-        xx_ones = torch.ones([1, self.y_dim], dtype=torch.int32).cuda()
+        xx_ones = torch.ones([1, self.y_dim], dtype=torch.int32).to(self.device)
         xx_ones = xx_ones.unsqueeze(-1)
 
-        xx_range = torch.arange(self.x_dim, dtype=torch.int32).unsqueeze(0).cuda()
+        xx_range = torch.arange(self.x_dim, dtype=torch.int32).unsqueeze(0).to(self.device)
         xx_range = xx_range.unsqueeze(1)
 
         xx_channel = torch.matmul(xx_ones.float(), xx_range.float())
         xx_channel = xx_channel.unsqueeze(-1)
 
-        yy_ones = torch.ones([1, self.x_dim], dtype=torch.int32).cuda()
+        yy_ones = torch.ones([1, self.x_dim], dtype=torch.int32).to(self.device)
         yy_ones = yy_ones.unsqueeze(1)
 
-        yy_range = torch.arange(self.y_dim, dtype=torch.int32).unsqueeze(0).cuda()
+        yy_range = torch.arange(self.y_dim, dtype=torch.int32).unsqueeze(0).to(self.device)
         yy_range = yy_range.unsqueeze(-1)
 
         yy_channel = torch.matmul(yy_range.float(), yy_ones.float())
@@ -57,8 +58,8 @@ class AddCoordsTh(nn.Module):
             yy_boundary_channel = torch.where(boundary_channel > 0.05,
                                               yy_channel, zero_tensor)
         if self.with_boundary and type(heatmap) != type(None):
-            xx_boundary_channel = xx_boundary_channel.cuda()
-            yy_boundary_channel = yy_boundary_channel.cuda()
+            xx_boundary_channel = xx_boundary_channel.to(self.device)
+            yy_boundary_channel = yy_boundary_channel.to(self.device)
         ret = torch.cat([input_tensor, xx_channel, yy_channel], dim=1)
 
         if self.with_r:
@@ -225,8 +226,8 @@ class HourGlass(nn.Module):
         low3 = low2
         low3 = self._modules['b3_' + str(level)](low3)
 
-        up2 = F.upsample(low3, scale_factor=2, mode='nearest')
-
+        # up2 = F.upsample(low3, scale_factor=2, mode='nearest')
+        up2 = F.interpolate(low3, scale_factor=2, mode='nearest', align_corners=False)
         return up1 + up2
 
     def forward(self, x, heatmap):

@@ -30,7 +30,7 @@ def get_preds_fromhm(hm, center=None, scale=None, rot=None):
         for j in range(preds.size(1)):
             hm_ = hm[i, j, :]
             pX, pY = int(preds[i, j, 0]) - 1, int(preds[i, j, 1]) - 1
-            if pX > 0 and pX < 63 and pY > 0 and pY < 63:
+            if 0 < pX < 63 and 0 < pY < 63:
                 diff = torch.FloatTensor(
                     [hm_[pY, pX + 1] - hm_[pY, pX - 1],
                      hm_[pY + 1, pX] - hm_[pY - 1, pX]])

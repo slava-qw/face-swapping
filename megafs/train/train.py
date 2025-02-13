@@ -1,3 +1,5 @@
+import gc
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -6,10 +8,13 @@ from typing import Tuple, Dict
 import lpips
 from dataclasses import dataclass
 
+from tqdm import tqdm
+
 from inference.megafs import HieRFE, Generator, resnet50
 from inference.swapper import FaceTransferAttnModule
 from loss_models import IdentityLoss, LandmarkLoss
-from utils.img_utils import MyImagePathDataset
+from utils.img_dataset import MyImagePathDataset
+import torch.nn.functional as F
 
 
 @dataclass
@@ -28,6 +33,7 @@ class TrainingConfig:
     latent_dim: int = 512
     num_latents: Tuple[int] = (4, 6, 8)
     backbone_depth: int = 50
+    img_root: str = "./data_imgs/CelebAMask-HQ"
 
 
 class FTAMTrainer:
@@ -36,6 +42,11 @@ class FTAMTrainer:
     def __init__(self, config: TrainingConfig, device: torch.device):
         self.config = config
         self.device = device
+        self.weight_coefs = [
+            config.lpips_weight,
+            config.id_weight,
+            config.landmark_weight,
+            config.norm_weight]
 
         # Initialize models
         self.hierfe = HieRFE(
@@ -47,7 +58,7 @@ class FTAMTrainer:
         self.generator = Generator(
             size=config.generator_channels,
             style_dim=config.latent_dim,
-            n_latent=8,
+            n_mlp=8,
             channel_multiplier=2
         ).to(device).eval()
 
@@ -78,12 +89,13 @@ class FTAMTrainer:
         swapped_enc = self.ftam(src_enc, tgt_enc)
         swapped_face, _ = self.generator(tgt_struct, [swapped_enc, None], randomize_noise=False)
 
+        sw_256 = F.interpolate(swapped_face, size=(256, 256), mode='bilinear', align_corners=False)
         # Calculate loss components
         loss_dict = {
-            'lpips': self.config.lpips_weight * self.lpips_loss(tgt, swapped_face, normalize=True),
-            'identity': self.config.id_weight * self.id_loss(tgt, swapped_face),
-            'landmark': self.config.landmark_weight * self.landmark_loss(tgt, swapped_face),
-            'norm': self.config.norm_weight * self.mse_loss(src_enc, swapped_enc)
+            'lpips': torch.mean(self.lpips_loss(tgt, sw_256, normalize=True)),
+            'identity': torch.mean(self.id_loss(tgt, sw_256)),
+            'landmark': self.landmark_loss(tgt, sw_256),
+            'norm': self.mse_loss(src_enc, swapped_enc)
         }
         return loss_dict
 
@@ -94,7 +106,7 @@ class FTAMTrainer:
 
         src, tgt = batch
         loss_dict = self.compute_loss(src, tgt)
-        total_loss = sum(loss_dict.values())
+        total_loss = sum([w * v for w, v in zip(self.weight_coefs, loss_dict.values())])
 
         total_loss.backward()
         self.optimizer.step()
@@ -103,18 +115,23 @@ class FTAMTrainer:
 
     def train(self, dataloader: DataLoader, num_epochs: int = 1):
         """Full training loop"""
-        for epoch in range(num_epochs):
-            for batch in dataloader:
+        for epoch in tqdm(range(num_epochs), desc="Training"):
+            for batch in tqdm(dataloader, desc=f"Epoch {epoch}", leave=False):
                 batch = [x.to(self.device) for x in batch]
                 loss_metrics = self.train_step(batch)
+
+                del batch
+                gc.collect()
+                torch.cuda.empty_cache()
                 # TODO: Add logging/checkpoint saving
+
 
 
 def main():
     config = TrainingConfig()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    dataset = MyImagePathDataset(img_root="path/to/images", pairs="pairs.txt")
+    dataset = MyImagePathDataset(img_root=config.img_root, pairs="pairs.txt")
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
@@ -127,4 +144,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    print(42)
+    # main()

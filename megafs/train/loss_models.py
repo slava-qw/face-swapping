@@ -17,7 +17,7 @@ class IdentityLoss(nn.Module):
     def forward(self, source, swap):
         source = self.model(F.interpolate(source, [112, 112], mode='bilinear', align_corners=False))
         swap = self.model(F.interpolate(swap, [112, 112], mode='bilinear', align_corners=False))
-        return 1 - nn.CosineSimilarity()(source, swap, dim=1)
+        return 1 - nn.CosineSimilarity(dim=1)(source, swap)
 
 
 class LandmarkLoss(nn.Module):
@@ -26,7 +26,7 @@ class LandmarkLoss(nn.Module):
         self.device = device
         self.model = FAN(4, "False", "False", 98)
         self.setup_model('losses/pretrained_ckpts/WFLW_4HG.pth')
-        self._mse = torch.nn.MSELoss(reduction='none')
+        # self._mse = nn.MSELoss(reduction='none')
 
     def setup_model(self, path_to_model: str):
         checkpoint = torch.load(path_to_model, map_location='cpu')
@@ -42,10 +42,10 @@ class LandmarkLoss(nn.Module):
         self.model.eval().to(self.device)
 
     def forward(self, target, swap):
-        swap = torch.nn.functional.interpolate(swap, [256, 256], mode='bilinear', align_corners=False)
-        target = torch.nn.functional.interpolate(target, [256, 256], mode='bilinear', align_corners=False)
+        swap = F.interpolate(swap, [256, 256], mode='bilinear', align_corners=False)
+        target = F.interpolate(target, [256, 256], mode='bilinear', align_corners=False)
 
         swap_lmk, _ = detect_landmarks(swap, self.model, normalize=True)
         target_lmk, _ = detect_landmarks(target, self.model, normalize=True)
 
-        return nn.MSELoss()(swap_lmk - target_lmk)
+        return torch.norm(swap_lmk - target_lmk, 2)
