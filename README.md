@@ -38,7 +38,7 @@ on computer vision and pattern recognition, pages 6608–
 - ID similarity:  [Deep3DFaceRecon](https://github.com/sicxu/Deep3DFaceRecon_pytorch) from Yu Deng, et al. "Accurate 3d face reconstruction with weakly-supervised learning: From single image to image set".
 In Proceedings of the IEEE/CVF conference on computer vision and pattern recognition workshops, pages 0–0, 2019.
 
-For the pose and expression the L2 distance was employed to compare the vectorised representations of 
+For the pose and expression the L2 distance was employed to compare the vectorized representations of 
 target image and swapped image.
 
 ## TODO:

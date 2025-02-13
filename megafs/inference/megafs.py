@@ -2,21 +2,87 @@ import math
 import random
 import functools
 import operator
+from collections import abc
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Function
 import torch.utils.model_zoo as model_zoo
-from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
+
+# from op import FusedLeakyReLU, fused_leaky_relu, upfirdn2d
+
 ## =====================Encoder==================================
 model_urls = {
-  'resnet18': 'https://s3.amazonaws.com/pytorch/models/resnet18-5c106cde.pth',
-  'resnet34': 'https://s3.amazonaws.com/pytorch/models/resnet34-333f7ec4.pth',
-  'resnet50': 'https://s3.amazonaws.com/pytorch/models/resnet50-19c8e357.pth',
-  'resnet101': 'https://s3.amazonaws.com/pytorch/models/resnet101-5d3b4d8f.pth',
-  'resnet152': 'https://s3.amazonaws.com/pytorch/models/resnet152-b121ed2d.pth',
+    'resnet18': 'https://s3.amazonaws.com/pytorch/models/resnet18-5c106cde.pth',
+    'resnet34': 'https://s3.amazonaws.com/pytorch/models/resnet34-333f7ec4.pth',
+    'resnet50': 'https://s3.amazonaws.com/pytorch/models/resnet50-19c8e357.pth',
+    'resnet101': 'https://s3.amazonaws.com/pytorch/models/resnet101-5d3b4d8f.pth',
+    'resnet152': 'https://s3.amazonaws.com/pytorch/models/resnet152-b121ed2d.pth',
 }
+
+
+def upfirdn2d_native(
+        input, kernel, up_x, up_y, down_x, down_y, pad_x0, pad_x1, pad_y0, pad_y1
+):
+    _, channel, in_h, in_w = input.shape
+    input = input.reshape(-1, in_h, in_w, 1)
+
+    _, in_h, in_w, minor = input.shape
+    kernel_h, kernel_w = kernel.shape
+
+    out = input.view(-1, in_h, 1, in_w, 1, minor)
+    out = F.pad(out, [0, 0, 0, up_x - 1, 0, 0, 0, up_y - 1])
+    out = out.view(-1, in_h * up_y, in_w * up_x, minor)
+
+    out = F.pad(
+        out, [0, 0, max(pad_x0, 0), max(pad_x1, 0), max(pad_y0, 0), max(pad_y1, 0)]
+    )
+    out = out[
+          :,
+          max(-pad_y0, 0): out.shape[1] - max(-pad_y1, 0),
+          max(-pad_x0, 0): out.shape[2] - max(-pad_x1, 0),
+          :,
+          ]
+
+    out = out.permute(0, 3, 1, 2)
+    out = out.reshape(
+        [-1, 1, in_h * up_y + pad_y0 + pad_y1, in_w * up_x + pad_x0 + pad_x1]
+    )
+    w = torch.flip(kernel, [0, 1]).view(1, 1, kernel_h, kernel_w)
+    out = F.conv2d(out, w)
+    out = out.reshape(
+        -1,
+        minor,
+        in_h * up_y + pad_y0 + pad_y1 - kernel_h + 1,
+        in_w * up_x + pad_x0 + pad_x1 - kernel_w + 1,
+    )
+    out = out.permute(0, 2, 3, 1)
+    out = out[:, ::down_y, ::down_x, :]
+
+    out_h = (in_h * up_y + pad_y0 + pad_y1 - kernel_h + down_y) // down_y
+    out_w = (in_w * up_x + pad_x0 + pad_x1 - kernel_w + down_x) // down_x
+
+    return out.view(-1, channel, out_h, out_w)
+
+
+def upfirdn2d(input, kernel, up=1, down=1, pad=(0, 0)):
+    if not isinstance(up, abc.Iterable):
+        up = (up, up)
+
+    if not isinstance(down, abc.Iterable):
+        down = (down, down)
+
+    if len(pad) == 2:
+        pad = (pad[0], pad[1], pad[0], pad[1])
+
+    if True:  #input.device.type == "cpu":
+        out = upfirdn2d_native(input, kernel, *up, *down, *pad)
+    else:
+        out = UpFirDn2d.apply(input, kernel, up, down, pad)
+
+    return out
+
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
@@ -153,7 +219,7 @@ class ResNet(nn.Module):
                                        dilate=replace_stride_with_dilation[2])
         if not omega_only:
             self.layer5 = self._make_layer(block, 512, layers[4], stride=2,
-                                        dilate=replace_stride_with_dilation[2])                 
+                                           dilate=replace_stride_with_dilation[2])
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -220,22 +286,25 @@ def _resnet(arch, block, layers, **kwargs):
     model = ResNet(block, layers, **kwargs)
     return model
 
+
 def resnet50(pretrained=False, omega_only=False):
-  """Constructs a ResNet-50 model.
+    """Constructs a ResNet-50 model.
   Args:
     pretrained (bool): If True, returns a model pre-trained on ImageNet
   """
-  model = ResNet(Bottleneck, [3, 4, 6, 3, 2], omega_only=omega_only)
-  if pretrained:
-    model.load_state_dict(model_zoo.load_url(model_urls['resnet50']), strict=False)
-  return model
+    model = ResNet(Bottleneck, [3, 4, 6, 3, 2], omega_only=omega_only)
+    if pretrained:
+        model.load_state_dict(model_zoo.load_url(model_urls['resnet50']), strict=False)
+    return model
 
-def conv_bn(inp, oup, stride = 1):
+
+def conv_bn(inp, oup, stride=1):
     return nn.Sequential(
         nn.Conv2d(inp, oup, 3, stride, 1, bias=True),
         nn.BatchNorm2d(oup),
         nn.ReLU()
     )
+
 
 def conv_bn1X1(inp, oup, stride):
     return nn.Sequential(
@@ -244,33 +313,35 @@ def conv_bn1X1(inp, oup, stride):
         nn.ReLU()
     )
 
+
 class FPN(nn.Module):
     def __init__(self, backbone, depth, omega_only):
         super(FPN, self).__init__()
-        scale = 4 if depth==50 else 1
+        scale = 4 if depth == 50 else 1
         self.omega_only = omega_only
         self.backbone = backbone
-        self.output1 = conv_bn(128*scale, 512, stride=1)
-        self.output2 = conv_bn(256*scale, 512, stride=1)
-        self.output3 = conv_bn(512*scale, 512, stride=1)
+        self.output1 = conv_bn(128 * scale, 512, stride=1)
+        self.output2 = conv_bn(256 * scale, 512, stride=1)
+        self.output3 = conv_bn(512 * scale, 512, stride=1)
         if not omega_only:
             self.output4 = nn.Sequential(
-                                        nn.Conv2d(512*scale, 512, 3, 1, padding=1, bias=True),
-                                        nn.BatchNorm2d(512)
-                                        )
+                nn.Conv2d(512 * scale, 512, 3, 1, padding=1, bias=True),
+                nn.BatchNorm2d(512)
+            )
 
     def forward(self, x):
         if not self.omega_only:
             c1, c2, c3, c4 = self.backbone(x)
-            p4 = self.output4(c4)                                               # N, 512, 4, 4
+            p4 = self.output4(c4)  # N, 512, 4, 4
         else:
             c1, c2, c3 = self.backbone(x)
             p4 = None
-        p3 = self.output3(c3)                                                   # N, 512, 8, 8
-        p2 = self.output2(c2) + F.upsample(p3, scale_factor=2, mode='bilinear', align_corners=True) # N, 512, 16, 16
-        p1 = self.output1(c1) + F.upsample(p2, scale_factor=2, mode='bilinear', align_corners=True) # N, 512, 32, 32
+        p3 = self.output3(c3)  # N, 512, 8, 8
+        p2 = self.output2(c2) + F.interpolate(p3, scale_factor=2, mode='bilinear', align_corners=True)  # N, 512, 16, 16
+        p1 = self.output1(c1) + F.interpolate(p2, scale_factor=2, mode='bilinear', align_corners=True)  # N, 512, 32, 32
 
         return p4, p3, p2, p1
+
 
 class styleMapping(nn.Module):
     def __init__(self, size):
@@ -283,9 +354,11 @@ class styleMapping(nn.Module):
             convs.append(nn.BatchNorm2d(512))
             convs.append(nn.LeakyReLU(inplace=True))
         self.convs = nn.Sequential(*convs)
+
     def forward(self, x):
         x = self.convs(x).squeeze(2).squeeze(2).unsqueeze(1)
         return x
+
 
 class HieRFE(nn.Module):
     def __init__(self, backbone, num_latents=[3, 4, 7], depth=50, omega_only=False):
@@ -301,7 +374,7 @@ class HieRFE(nn.Module):
         self.mapping3 = nn.ModuleList()
         for i in range(num_latents[2]):
             self.mapping3.append(styleMapping(32))
-        
+
     def forward(self, x):
         latents = []
         f4, f8, f16, f32 = self.fpn(x)
@@ -327,12 +400,13 @@ class TransferCell(nn.Module):
         self.act = nn.LeakyReLU(True)
 
         for i in range(self.num_blocks):
-            self.idd_selectors.append(nn.Sequential(nn.Linear(1024, 256), nn.ReLU(True), nn.Linear(256, 512), nn.Sigmoid()))
+            self.idd_selectors.append(
+                nn.Sequential(nn.Linear(1024, 256), nn.ReLU(True), nn.Linear(256, 512), nn.Sigmoid()))
             self.idd_shifters.append(nn.Sequential(nn.Linear(1024, 256), nn.ReLU(True), nn.Linear(256, 512), nn.Tanh()))
 
-            self.att_selectors.append(nn.Sequential(nn.Linear(1024, 256), nn.ReLU(True), nn.Linear(256, 512), nn.Sigmoid()))
+            self.att_selectors.append(
+                nn.Sequential(nn.Linear(1024, 256), nn.ReLU(True), nn.Linear(256, 512), nn.Sigmoid()))
             self.att_shifters.append(nn.Sequential(nn.Linear(1024, 256), nn.ReLU(True), nn.Linear(256, 512), nn.Tanh()))
-
 
     def forward(self, idd, att):
         for i in range(self.num_blocks):
@@ -341,10 +415,11 @@ class TransferCell(nn.Module):
             att = self.act(att * self.att_selectors[i](fuse) + self.att_shifters[i](fuse))
         return idd.unsqueeze(1), att.unsqueeze(1)
 
+
 class InjectionBlock(nn.Module):
-    def __init__(self,):
+    def __init__(self, ):
         super(InjectionBlock, self).__init__()
-        self.idd_linears = nn.Sequential(nn.Linear(512, 512),nn.ReLU(True))
+        self.idd_linears = nn.Sequential(nn.Linear(512, 512), nn.ReLU(True))
         self.idd_selectors = nn.Linear(512, 512)
         self.idd_shifters = nn.Linear(512, 512)
         self.att_bns = nn.BatchNorm1d(512, affine=False)
@@ -358,7 +433,7 @@ class InjectionBlock(nn.Module):
         out = normalized * (1 + gamma) + beta
         return out
 
-        
+
 class InjectionResBlock(nn.Module):
     def __init__(self, num_blocks):
         super(InjectionResBlock, self).__init__()
@@ -373,10 +448,9 @@ class InjectionResBlock(nn.Module):
             self.att_path1.append(nn.Sequential(InjectionBlock(), nn.LeakyReLU(True), nn.Linear(512, 512)))
             self.att_path2.append(nn.Sequential(InjectionBlock(), nn.LeakyReLU(True), nn.Linear(512, 512)))
 
-
     def forward(self, idd, att):
         for i in range(self.num_blocks):
-            att_bias = att*1
+            att_bias = att * 1
             att = self.att_path1[i]((idd, att))
             att = self.att_path2[i]((idd, att))
             att = att + att_bias
@@ -400,20 +474,20 @@ class FaceTransferModule(nn.Module):
                 self.blocks.append(TransferCell(num_blocks))
 
             self.weight = nn.Parameter(torch.randn(1, self.num_latents, 512))
-        
+
         elif self.type == "injection":
             self.swap_indice = swap_indice
             self.num_latents = num_latents - swap_indice
             self.blocks = nn.ModuleList()
             for i in range(self.num_latents):
                 self.blocks.append(InjectionResBlock(num_blocks))
-        
+
         elif self.type == "lcr":
             self.swap_indice = swap_indice
-        
+
         else:
             raise NotImplementedError()
-        
+
     def forward(self, idd, att):
         if self.type == "ftm":
             att_low = att[:, :self.swap_indice]
@@ -430,10 +504,10 @@ class FaceTransferModule(nn.Module):
             idds = torch.cat(idds, 1)
             atts = torch.cat(atts, 1)
             scale = torch.sigmoid(self.weight).expand(N, -1, -1)
-            latents = scale * idds + (1-scale) * atts
+            latents = scale * idds + (1 - scale) * atts
 
             return torch.cat([att_low, latents], 1)
-            
+
         elif self.type == "injection":
             att_low = att[:, :self.swap_indice]
             idd_high = idd[:, self.swap_indice:]
@@ -446,12 +520,13 @@ class FaceTransferModule(nn.Module):
                 latents.append(new_latent)
             latents = torch.cat(latents, 1)
             return torch.cat([att_low, latents], 1)
-        
+
         elif self.type == "lcr":
             return LCR(idd, att, swap_indice=self.swap_indice)
-        
+
         else:
             raise NotImplementedError()
+
 
 ## ====================styleGAN2================================================================================================================
 class PixelNorm(nn.Module):
@@ -490,7 +565,6 @@ class Upsample(nn.Module):
 
     def forward(self, input):
         out = upfirdn2d(input, self.kernel, up=self.factor, down=1, pad=self.pad)
-
         return out
 
 
@@ -530,13 +604,13 @@ class Blur(nn.Module):
 
     def forward(self, input):
         out = upfirdn2d(input, self.kernel, pad=self.pad)
-
+        # out = upfirdn2d_native(input, self.kernel, 1, 1, 1, 1, 0, 0, 0, 0)
         return out
 
 
 class EqualConv2d(nn.Module):
     def __init__(
-        self, in_channel, out_channel, kernel_size, stride=1, padding=0, bias=True
+            self, in_channel, out_channel, kernel_size, stride=1, padding=0, bias=True
     ):
         super().__init__()
 
@@ -574,7 +648,7 @@ class EqualConv2d(nn.Module):
 
 class EqualLinear(nn.Module):
     def __init__(
-        self, in_dim, out_dim, bias=True, bias_init=0, lr_mul=1, activation=None
+            self, in_dim, out_dim, bias=True, bias_init=0, lr_mul=1, activation=None
     ):
         super().__init__()
 
@@ -623,15 +697,15 @@ class ScaledLeakyReLU(nn.Module):
 
 class ModulatedConv2d(nn.Module):
     def __init__(
-        self,
-        in_channel,
-        out_channel,
-        kernel_size,
-        style_dim,
-        demodulate=True,
-        upsample=False,
-        downsample=False,
-        blur_kernel=[1, 3, 3, 1],
+            self,
+            in_channel,
+            out_channel,
+            kernel_size,
+            style_dim,
+            demodulate=True,
+            upsample=False,
+            downsample=False,
+            blur_kernel=[1, 3, 3, 1],
     ):
         super().__init__()
 
@@ -751,14 +825,14 @@ class ConstantInput(nn.Module):
 
 class StyledConv(nn.Module):
     def __init__(
-        self,
-        in_channel,
-        out_channel,
-        kernel_size,
-        style_dim,
-        upsample=False,
-        blur_kernel=[1, 3, 3, 1],
-        demodulate=True,
+            self,
+            in_channel,
+            out_channel,
+            kernel_size,
+            style_dim,
+            upsample=False,
+            blur_kernel=[1, 3, 3, 1],
+            demodulate=True,
     ):
         super().__init__()
 
@@ -773,14 +847,14 @@ class StyledConv(nn.Module):
         )
 
         self.noise = NoiseInjection()
-        # self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
-        # self.activate = ScaledLeakyReLU(0.2)
-        self.activate = FusedLeakyReLU(out_channel)
+        self.bias = nn.Parameter(torch.zeros(1, out_channel, 1, 1))
+        self.activate = ScaledLeakyReLU(0.2)
+        # self.activate = FusedLeakyReLU(out_channel)
 
     def forward(self, input, style, noise=None):
         out = self.conv(input, style)
         out = self.noise(out, noise=noise)
-        # out = out + self.bias
+        out = out + self.bias
         out = self.activate(out)
 
         return out
@@ -810,13 +884,13 @@ class ToRGB(nn.Module):
 
 class Generator(nn.Module):
     def __init__(
-        self,
-        size,
-        style_dim,
-        n_mlp,
-        channel_multiplier=2,
-        blur_kernel=[1, 3, 3, 1],
-        lr_mlp=0.01,
+            self,
+            size,
+            style_dim,
+            n_mlp,
+            channel_multiplier=2,
+            blur_kernel=[1, 3, 3, 1],
+            lr_mlp=0.01,
     ):
         super().__init__()
 
@@ -917,18 +991,18 @@ class Generator(nn.Module):
         return self.style(input)
 
     def forward(
-        self,
-        strucs,
-        styles,
-        return_latents=False,
-        inject_index=None,
-        truncation=1,
-        truncation_latent=None,
-        input_is_latent=True,
-        noise=None,
-        randomize_noise=True,
+            self,
+            strucs,
+            styles,
+            return_latents=False,
+            inject_index=None,
+            truncation=1,
+            truncation_latent=None,
+            input_is_latent=True,
+            noise=None,
+            randomize_noise=True,
     ):
-        
+
         if not input_is_latent:
             styles = [self.style(s) for s in styles]
 
@@ -966,7 +1040,7 @@ class Generator(nn.Module):
                 latent2 = styles[1].unsqueeze(1).repeat(1, self.n_latent - inject_index, 1)
 
                 latent = torch.cat([latent, latent2], 1)
-        
+        print('latent', latent.shape)
         out = strucs if strucs is not None else self.input(latent)
         out = self.conv1(out, latent[:, 0], noise=noise[0])
 
@@ -974,7 +1048,7 @@ class Generator(nn.Module):
 
         i = 1
         for conv1, conv2, noise1, noise2, to_rgb in zip(
-            self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
+                self.convs[::2], self.convs[1::2], noise[1::2], noise[2::2], self.to_rgbs
         ):
             out = conv1(out, latent[:, i], noise=noise1)
             out = conv2(out, latent[:, i + 1], noise=noise2)
@@ -993,14 +1067,14 @@ class Generator(nn.Module):
 
 class ConvLayer(nn.Sequential):
     def __init__(
-        self,
-        in_channel,
-        out_channel,
-        kernel_size,
-        downsample=False,
-        blur_kernel=[1, 3, 3, 1],
-        bias=True,
-        activate=True,
+            self,
+            in_channel,
+            out_channel,
+            kernel_size,
+            downsample=False,
+            blur_kernel=[1, 3, 3, 1],
+            bias=True,
+            activate=True,
     ):
         layers = []
 

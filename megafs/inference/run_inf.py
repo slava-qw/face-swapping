@@ -1,12 +1,14 @@
 import os
 import cv2
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as tF
 import torch
 import gc
 from inference import MegaFS
+
+from swapper import FaceTransferAttnModule
 
 
 class FaceSwapDataset(Dataset):
@@ -101,6 +103,8 @@ str2num = {
 class My_MegaFS(MegaFS):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.ftam = FaceTransferAttnModule().to(self.device)
 
     def read_pair(self, src_idx, tgt_idx):
         src_face = cv2.imread(os.path.join(self.img_root, "{}.jpg".format(src_idx)))
@@ -113,7 +117,7 @@ class My_MegaFS(MegaFS):
 
         return src_face_rgb, tgt_face_rgb, tgt_mask
 
-    def run(self, src_idx, tgt_idx, refine=False, save_path='/content'):
+    def run(self, src_idx, tgt_idx, refine=False, save_path='./results'):
         src_face_rgb, tgt_face_rgb, tgt_mask = self.read_pair(src_idx, tgt_idx)
         source, target = self.preprocess(src_face_rgb, tgt_face_rgb)
         swapped_face = self.swap(source, target)
@@ -128,24 +132,47 @@ class My_MegaFS(MegaFS):
             result = np.hstack((result, refined_face))
 
         save_path = f"{save_path}/{self.swap_type}_{src_idx}_and_{tgt_idx}"
-        print(save_path)
+        print(f'{save_path=}')
         cv2.imwrite("{}.jpg".format(save_path), result)
 
+    def swap(self, source, target):
+        with torch.no_grad():
+            ts = torch.cat([target, source], dim=0).to(self.device)
+            lats, struct = self.encoder(ts)
 
-if __name__ == "__main__":
-    import random
+            idd_lats = lats[1:]  # extracted from source image
+            att_lats = lats[0].unsqueeze_(0)  # extracted from target image
 
-    # TODO: fix all paths
-    img_root = "/content/CelebAMask-HQ/CelebA-HQ-img"
-    mask_root = "/content/content/masks_output"
+            swapped_lats = self.swapper(idd_lats, att_lats)
+            # swapped_lats = self.ftam(idd_lats, att_lats)
+            fake_swap, _ = self.generator(struct[0].unsqueeze_(0), [swapped_lats, None], randomize_noise=False)
 
-    handler = My_MegaFS(swap_type="ftm",
-                        img_root=img_root,
-                        mask_root=mask_root)
+            fake_swap_max = torch.max(fake_swap)
+            fake_swap_min = torch.min(fake_swap)
+            denormed_fake_swap = (fake_swap[0] - fake_swap_min) / (fake_swap_max - fake_swap_min) * 255.0
+            fake_swap_numpy = denormed_fake_swap.permute((1, 2, 0)).cpu().numpy()
+        return fake_swap_numpy
 
-    N = 10000
-    rd1 = random.sample(range(0, 30000), N)
-    rd2 = random.sample(range(0, 30000), N)
 
-    pairs = [(str(i), str(j)) for i, j in zip(rd1, rd2)]
-    run_in_batches(handler, img_root, mask_root, pairs, batch_size=1, num_workers=4)
+mfs = My_MegaFS('ftm',
+                r'D:\PycharmProjects\face_swapping_gans\face-swapping\megafs\data_imgs\ex_imgs',
+                r'D:\PycharmProjects\face_swapping_gans\face-swapping\megafs\data_imgs\ex_imgs')
+mfs.run(10, 0, save_path="D:\PycharmProjects\face_swapping_gans\face-swapping\megafs\data_imgs\ex_img")
+
+# if __name__ == "__main__":
+#     import random
+#
+#     # TODO: fix all paths
+#     img_root = "/content/CelebAMask-HQ/CelebA-HQ-img"
+#     mask_root = "/content/content/masks_output"
+#
+#     handler = My_MegaFS(swap_type="ftm",
+#                         img_root=img_root,
+#                         mask_root=mask_root)
+#
+#     N = 10000
+#     rd1 = random.sample(range(0, 30000), N)
+#     rd2 = random.sample(range(0, 30000), N)
+#
+#     pairs = [(str(i), str(j)) for i, j in zip(rd1, rd2)]
+#     run_in_batches(handler, img_root, mask_root, pairs, batch_size=1, num_workers=4)

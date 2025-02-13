@@ -74,9 +74,10 @@ class MegaFS(object):
         latent_split = [4, 6, 8]
         num_latents = 18
         swap_indice = 4
-        self.encoder = HieRFE(resnet50(False), num_latents=latent_split, depth=50).cuda()
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.encoder = HieRFE(resnet50(False), num_latents=latent_split, depth=50).to(self.device)
         self.swapper = FaceTransferModule(num_blocks=num_blocks, swap_indice=swap_indice, num_latents=num_latents,
-                                          typ=self.swap_type).cuda()
+                                          typ=self.swap_type).to(self.device)
         ckpt_e = "./checkpoint/{}_final.pth".format(self.swap_type)
         if ckpt_e is not None:
             print("load encoder & swapper:", ckpt_e)
@@ -85,7 +86,7 @@ class MegaFS(object):
             self.swapper.load_state_dict(ckpts["s"])
             del ckpts
 
-        self.generator = Generator(self.size, 512, 8, channel_multiplier=2).cuda()
+        self.generator = Generator(self.size, 512, 8, channel_multiplier=2).to(self.device)
         ckpt_f = "./checkpoint/stylegan2-ffhq-config-f.pth"
         if ckpt_f is not None:
             print("load generator:", ckpt_f)
@@ -93,7 +94,7 @@ class MegaFS(object):
             self.generator.load_state_dict(ckpts["g_ema"], strict=False)
             del ckpts
 
-        self.smooth_mask = SoftErosion(kernel_size=17, threshold=0.9, iterations=7).cuda()
+        self.smooth_mask = SoftErosion(kernel_size=17, threshold=0.9, iterations=7).to(self.device)
 
         self.encoder.eval()
         self.swapper.eval()
@@ -168,7 +169,7 @@ class MegaFS(object):
     def postprocess(self, swapped_face, target, target_mask):
         target_mask = cv2.resize(target_mask, (self.size, self.size))
 
-        mask_tensor = torch.from_numpy(target_mask.copy().transpose((2, 0, 1))).float().mul_(1 / 255.0).cuda()
+        mask_tensor = torch.from_numpy(target_mask.copy().transpose((2, 0, 1))).float().mul_(1 / 255.0).to(self.device)
         face_mask_tensor = mask_tensor[0] + mask_tensor[1]
 
         soft_face_mask_tensor, _ = self.smooth_mask(face_mask_tensor.unsqueeze_(0).unsqueeze_(0))

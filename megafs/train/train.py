@@ -2,81 +2,129 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torchvision import transforms
-from megafs import HieRFE, FaceTransferModule, Generator, resnet50
-from dataset import FaceDataset  # Assume we create a dataset class for CelebA-HQ
-from loss_models import get_feature_extractor, get_id_extractor, get_landmark_detector
+from typing import Tuple, Dict
+import lpips
+from dataclasses import dataclass
+
+from inference.megafs import HieRFE, Generator, resnet50
+from inference.swapper import FaceTransferAttnModule
+from loss_models import IdentityLoss, LandmarkLoss
+from utils.img_utils import MyImagePathDataset
 
 
-def train_hierfe(model, dataloader, optimizer, device):
-    model.train()
-    feature_extractor = get_feature_extractor()
-    id_extractor = get_id_extractor()
-    landmark_detector = get_landmark_detector()
-
-    for batch in dataloader:
-        images = batch.to(device)
-        optimizer.zero_grad()
-        encoded, _ = model(images)
-        decoded, _ = generator(_, [encoded, None], randomize_noise=False)
-
-        l_rec = nn.MSELoss()(images, decoded)
-        l_lpips = nn.MSELoss()(feature_extractor(images), feature_extractor(decoded))
-        l_id = 1 - nn.CosineSimilarity()(id_extractor(images), id_extractor(decoded))
-        l_ldm = nn.MSELoss()(landmark_detector(images), landmark_detector(decoded))
-
-        loss = l_rec + 0.8 * l_lpips + l_id + 1000 * l_ldm
-        loss.backward()
-        optimizer.step()
+@dataclass
+class TrainingConfig:
+    """Configuration class for training parameters"""
+    batch_size: int = 2
+    num_workers: int = 4
+    learning_rate: float = 1e-2
+    lpips_weight: float = 32.0
+    id_weight: float = 24.0
+    landmark_weight: float = 1e5
+    norm_weight: float = 32.0
+    embed_dim: int = 512
+    num_heads: int = 4
+    generator_channels: int = 1024
+    latent_dim: int = 512
+    num_latents: Tuple[int] = (4, 6, 8)
+    backbone_depth: int = 50
 
 
-def train_ftm(ftm, dataloader, optimizer, device):
-    ftm.train()
+class FTAMTrainer:
+    """Trainer class for Face Transfer Attention Module (FTAM)"""
 
-    feature_extractor = get_feature_extractor()
-    id_extractor = get_id_extractor()
-    landmark_detector = get_landmark_detector()
+    def __init__(self, config: TrainingConfig, device: torch.device):
+        self.config = config
+        self.device = device
 
-    for batch in dataloader:
-        src, tgt = batch["source"].to(device), batch["target"].to(device)
-        optimizer.zero_grad()
-        src_enc, _ = hierfe(src)
-        tgt_enc, _ = hierfe(tgt)
-        swapped_enc = ftm(src_enc, tgt_enc)
-        swapped_face, _ = generator(_, [swapped_enc, None], randomize_noise=False)
+        # Initialize models
+        self.hierfe = HieRFE(
+            backbone=resnet50(pretrained=False),
+            num_latents=config.num_latents,
+            depth=config.backbone_depth
+        ).to(device).eval()
 
-        l_rec = nn.MSELoss()(src, swapped_face)
-        l_lpips = nn.MSELoss()(feature_extractor(tgt), feature_extractor(swapped_face))
-        l_id = 1 - nn.CosineSimilarity()(id_extractor(src), id_extractor(swapped_face))
-        l_ldm = nn.MSELoss()(landmark_detector(tgt), landmark_detector(swapped_face))
-        l_norm = nn.MSELoss()(src_enc, swapped_enc)
+        self.generator = Generator(
+            size=config.generator_channels,
+            style_dim=config.latent_dim,
+            n_latent=8,
+            channel_multiplier=2
+        ).to(device).eval()
 
-        loss = 8 * l_rec + 32 * l_lpips + 24 * l_id + 100000 * l_ldm + 32 * l_norm
-        loss.backward()
-        optimizer.step()
+        self.ftam = FaceTransferAttnModule(
+            num_heads=config.num_heads,
+            embed_dim=config.embed_dim
+        ).to(device)
+
+        # Initialize loss functions
+        self.id_loss = IdentityLoss(device)
+        self.landmark_loss = LandmarkLoss(device)
+        self.lpips_loss = lpips.LPIPS(net='vgg').to(device)
+        self.mse_loss = nn.MSELoss()
+
+        # Initialize optimizer
+        self.optimizer = optim.Adam(
+            self.ftam.parameters(),
+            lr=config.learning_rate
+        )
+
+    def compute_loss(self, src: torch.Tensor, tgt: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Compute multi-component loss for face transfer"""
+        with torch.no_grad():
+            src_enc, _ = self.hierfe(src)
+            tgt_enc, tgt_struct = self.hierfe(tgt)
+
+        # Perform face transfer
+        swapped_enc = self.ftam(src_enc, tgt_enc)
+        swapped_face, _ = self.generator(tgt_struct, [swapped_enc, None], randomize_noise=False)
+
+        # Calculate loss components
+        loss_dict = {
+            'lpips': self.config.lpips_weight * self.lpips_loss(tgt, swapped_face, normalize=True),
+            'identity': self.config.id_weight * self.id_loss(tgt, swapped_face),
+            'landmark': self.config.landmark_weight * self.landmark_loss(tgt, swapped_face),
+            'norm': self.config.norm_weight * self.mse_loss(src_enc, swapped_enc)
+        }
+        return loss_dict
+
+    def train_step(self, batch: Tuple[torch.Tensor, torch.Tensor]) -> Dict[str, float]:
+        """Perform single training step"""
+        self.ftam.train()
+        self.optimizer.zero_grad()
+
+        src, tgt = batch
+        loss_dict = self.compute_loss(src, tgt)
+        total_loss = sum(loss_dict.values())
+
+        total_loss.backward()
+        self.optimizer.step()
+
+        return {k: v.item() for k, v in loss_dict.items()}
+
+    def train(self, dataloader: DataLoader, num_epochs: int = 1):
+        """Full training loop"""
+        for epoch in range(num_epochs):
+            for batch in dataloader:
+                batch = [x.to(self.device) for x in batch]
+                loss_metrics = self.train_step(batch)
+                # TODO: Add logging/checkpoint saving
 
 
-# Configuration
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-transform = transforms.Compose([
-    transforms.Resize((1024, 1024)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
-dataset = FaceDataset("/path/to/dataset", transform=transform)
-dataloader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=4)
+def main():
+    config = TrainingConfig()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Initialize models
-hierfe = HieRFE(resnet50(False), num_latents=[4, 6, 8], depth=50).to(device)
-ftm = FaceTransferModule(num_blocks=3, swap_indice=4, num_latents=18, typ="ftm").to(device)
-generator = Generator(1024, 512, 8, channel_multiplier=2).to(device)
+    dataset = MyImagePathDataset(img_root="path/to/images", pairs="pairs.txt")
+    dataloader = DataLoader(
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers
+    )
 
-# Define optimizers
-optimizer_hierfe = optim.Adam(hierfe.parameters(), lr=0.01)
-optimizer_ftm = optim.Adam(ftm.parameters(), lr=0.01)
+    trainer = FTAMTrainer(config, device)
+    trainer.train(dataloader)
 
-# Train HieRFE
-train_hierfe(hierfe, dataloader, optimizer_hierfe, device)
 
-# Train FTM
-train_ftm(ftm, dataloader, optimizer_ftm, device)
+if __name__ == "__main__":
+    main()
